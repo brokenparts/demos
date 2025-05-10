@@ -1,3 +1,15 @@
+//
+// Boids 5/9/2025
+//
+// Behavior rules are separated into different functions to make them easier to understand.
+// Because of this, this demo is slow. The sparsely allocated linked list doesn't help either.
+//
+// I might write a fast 3D version some day.
+//
+// ref: https://cs.stanford.edu/people/eroberts/courses/soco/projects/2008-09/modeling-natural-systems/boids.html
+// ref: https://vergenet.net/~conrad/boids/pseudocode.html
+//
+
 #include "common_core.hh"
 #include "common_math.hh"
 
@@ -7,7 +19,8 @@
 
 struct Boid {
   Vec2 pos;
-  f32  ang;
+  Vec2 vel;
+
   Boid *next;
 };
 
@@ -23,10 +36,13 @@ static struct {
   Boid *boids;
   u8 buttons;
   f32 next_spawn_time;
-  // Boid behavior
-  f32 boid_vision;
+  // Boid behavior settings
   f32 boid_speed;
+  f32 boid_vision;
   f32 boid_avoid;
+  f32 boid_weight_cohesion;
+  f32 boid_weight_separation;
+  f32 boid_weight_alignment;
   Vec2 boid_target;
 } g = { };
 
@@ -34,58 +50,100 @@ static void SpawnBoid(Vec2 pos)
 {
   Boid *boid = MemAlloc<Boid>();
   boid->pos = pos;
-  boid->ang = g.rng.NextF32(0.0f, 360.0f);
+  boid->vel.x = g.rng.NextF32(-1.0f, 1.0f);
+  boid->vel.y = g.rng.NextF32(-1.0f, 1.0f);
+  boid->vel = boid->vel.Normalize() * g.boid_speed;
+  
   boid->next = g.boids;
   g.boids = boid;
 }
 
-static void SimulateBoid(Boid* boid, f32 step)
+static Vec2 SimulateBoid_CalcRule1(Boid *boid)
 {
-  // Running averages
-  Vec2 avg_pos = Vec2();
-  Vec2 avg_vel = Vec2();
-  f32  avg_ang = 0.0f;
-  usize num_neighbors = 0;
-  Vec2 vel_sep = Vec2();
+  // Rule 1: Cohesion
+  // Boids try to fly towards the center of mass of neighboring boids
+  Vec2 result = Vec2();
+
+  size_t num_neighbors = 0;
   for (Boid *neighbor = g.boids; neighbor; neighbor = neighbor->next) {
-    const f32 dist = (boid->pos - neighbor->pos).Length();
-    if (neighbor == boid || dist > g.boid_vision) {
+    const f32 distance = (boid->pos - neighbor->pos).Length();
+    if (neighbor == boid || distance > g.boid_vision) {
       continue;
     }
-    // Separation
-    if (dist < g.boid_avoid) {
-      vel_sep += (boid->pos - neighbor->pos);
-    }
-    avg_pos += neighbor->pos;
-    avg_ang += neighbor->ang;
+    result += neighbor->pos;
     ++num_neighbors;
   }
 
   if (num_neighbors > 0) {
-    avg_pos /= (f32)num_neighbors;
-    avg_ang /= (f32)num_neighbors;
-
-    Vec2 vel = Vec2::FromEuler(boid->ang);
-
-    // Separation
-    Vec2 vel_s = vel_sep * 0.0005;
-
-    // Alignment
-    Vec2 vel_a = (Vec2::FromEuler(avg_ang) - vel) * 0.001;
-
-    // Cohesion
-    Vec2 vel_c = (avg_pos - boid->pos) * 0.000003;
-
-    // Track towards target
-    Vec2 vel_t = (g.boid_target - boid->pos) * 0.00005;
-
-    boid->ang = (vel + vel_s + vel_a + vel_c + vel_t).ToEuler();
+    result /= (f32)num_neighbors;
+    result -= boid->pos;
   }
 
-  boid->pos += Vec2::FromEuler(boid->ang) * step * g.boid_speed;
+  return result * g.boid_weight_cohesion;
 }
 
-static void RenderBoid(Boid* boid)
+static Vec2 SimulateBoid_CalcRule2(Boid *boid)
+{
+  // Rule 2: Separation
+  // Boids try to keep a small distance away from other boids
+  Vec2 result = Vec2();
+
+  for (Boid *neighbor = g.boids; neighbor; neighbor = neighbor->next) {
+    const f32 distance = (boid->pos - neighbor->pos).Length();
+    if (neighbor == boid || distance > g.boid_avoid) {
+      continue;
+    }
+    result -= (neighbor->pos - boid->pos);
+  }
+
+  return result * g.boid_weight_separation;
+}
+
+static Vec2 SimulateBoid_CalcRule3(Boid *boid)
+{
+  // Rule 3: Alignment
+  // Boids try to match velocity with neighboring boids
+  Vec2 result = Vec2();
+
+  size_t num_neighbors = 0;
+  for (Boid *neighbor = g.boids; neighbor; neighbor = neighbor->next) {
+    const f32 distance = (boid->pos - neighbor->pos).Length();
+    if (neighbor == boid || distance > g.boid_vision) {
+      continue;
+    }
+    result += neighbor->vel;
+    ++num_neighbors;
+  }
+
+  if (num_neighbors > 0) {
+    result /= (f32)num_neighbors;
+    result -= boid->vel;
+  }
+
+  return result * g.boid_weight_alignment;
+}
+
+static void SimulateBoid(Boid *boid, f32 step)
+{
+  Vec2 rule1 = SimulateBoid_CalcRule1(boid);
+  Vec2 rule2 = SimulateBoid_CalcRule2(boid);
+  Vec2 rule3 = SimulateBoid_CalcRule3(boid);
+
+  // Track towards target
+  Vec2 track = (g.boid_target - boid->pos) * 0.0001;
+
+  boid->vel += rule1 + rule2 + rule3 + track;
+
+  // Limit speed
+  const f32 speed = boid->vel.Length();
+  if (speed > g.boid_speed) {
+    boid->vel = boid->vel.Normalize() * g.boid_speed;
+  }
+
+  boid->pos += boid->vel * step;
+}
+
+static void RenderBoid(Boid *boid)
 {
   SDL_FRect body = {
     .x = boid->pos.x - 2,
@@ -95,8 +153,7 @@ static void RenderBoid(Boid* boid)
   };
   SDL_RenderFillRect(g.r, &body);
 
-  Vec2 dir = Vec2::FromEuler(boid->ang);
-  Vec2 flag = boid->pos + (dir * 10.0f);
+  const Vec2 flag = boid->pos + (boid->vel * 4.0f);
   SDL_RenderLine(g.r, boid->pos.x, boid->pos.y, flag.x, flag.y);
 }
 
@@ -111,9 +168,12 @@ SDL_AppResult SDL_AppInit(void **, int, char **)
   if (!(g.r = SDL_CreateRenderer(g.wnd, 0))) {
     panic("Failed to create SDL renderer: %s", SDL_GetError());
   }
-  g.boid_vision = 250.0f;
-  g.boid_speed = 15.0f;
+  g.boid_speed = 10.0f;
+  g.boid_vision = 128.0f;
   g.boid_avoid = 20.0f;
+  g.boid_weight_cohesion = 0.0001f;
+  g.boid_weight_separation = 0.001f;
+  g.boid_weight_alignment = 0.001f;
   return SDL_APP_CONTINUE;
 }
 
@@ -132,12 +192,6 @@ SDL_AppResult SDL_AppIterate(void *)
       g.buttons &= ~BTN_SPAWN;
     }
   }
-
-  int wnd_x = 0;
-  int wnd_y = 0;
-  SDL_GetRenderOutputSize(g.r, &wnd_x, &wnd_y);
-  g.boid_target.x = (f32)wnd_x / 2.0f;
-  g.boid_target.y = (f32)wnd_y / 2.0f;
 
   SDL_GetMouseState(&g.boid_target.x, &g.boid_target.y);
 
