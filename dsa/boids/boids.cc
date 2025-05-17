@@ -9,6 +9,8 @@
 // ref: https://cs.stanford.edu/people/eroberts/courses/soco/projects/2008-09/modeling-natural-systems/boids.html
 // ref: https://vergenet.net/~conrad/boids/pseudocode.html
 //
+// 5/27/2025: Added pause control, trails, and tuned some parameters
+//
 
 #include "common_core.hh"
 #include "common_math.hh"
@@ -20,6 +22,9 @@
 struct Boid {
   Vec2 pos;
   Vec2 vel;
+  Vec2 trail[10];
+  int  trail_len;
+  float next_trail_emit;
 
   Boid *next;
 };
@@ -34,6 +39,7 @@ static struct {
   SDL_Renderer *r;
   XorShift rng;
   Boid *boids;
+  bool paused;
   u8 buttons;
   f32 next_spawn_time;
   // Boid behavior settings
@@ -93,7 +99,7 @@ static Vec2 SimulateBoid_CalcRule2(Boid *boid)
     if (neighbor == boid || distance > g.boid_avoid) {
       continue;
     }
-    result -= (neighbor->pos - boid->pos);
+    result -= ((neighbor->pos - boid->pos) * (g.boid_avoid / distance) * 5.0f);
   }
 
   return result * g.boid_weight_separation;
@@ -130,7 +136,7 @@ static void SimulateBoid(Boid *boid, f32 step)
   Vec2 rule3 = SimulateBoid_CalcRule3(boid);
 
   // Track towards target
-  Vec2 track = (g.boid_target - boid->pos) * 0.0001;
+  Vec2 track = (g.boid_target - boid->pos) * 0.00005f;
 
   boid->vel += rule1 + rule2 + rule3 + track;
 
@@ -140,11 +146,35 @@ static void SimulateBoid(Boid *boid, f32 step)
     boid->vel = boid->vel.Normalize() * g.boid_speed;
   }
 
+  float now = (f32)SDL_GetTicks() / 1e3f;
+  if (boid->next_trail_emit <= now) {
+    boid->trail_len = Min(boid->trail_len + 1, (int)ARRLEN(boid->trail) - 1);
+    for (int i = boid->trail_len; i >= 1; --i) {
+      boid->trail[i] = boid->trail[i - 1];
+    }
+    boid->trail[0] = boid->pos;
+    boid->next_trail_emit = now + 0.1f;
+  }
+
   boid->pos += boid->vel * step;
 }
 
 static void RenderBoid(Boid *boid)
 {
+  Uint8 c_r = 0;
+  Uint8 c_g = 0;
+  Uint8 c_b = 0;
+  Uint8 c_a = 0;
+  SDL_GetRenderDrawColor(g.r, &c_r, &c_g, &c_b, &c_a);
+  Vec2 last_point = boid->pos;
+  for (int i = 0; i < boid->trail_len; ++i) {
+    Vec2 p = boid->trail[i];
+    SDL_SetRenderDrawColor(g.r, c_r, c_g, c_b, (f32)c_a * ((f32)boid->trail_len - (f32)i) / (f32)boid->trail_len);
+    SDL_RenderLine(g.r, p.x, p.y, last_point.x, last_point.y);
+    last_point = p;
+  }
+
+  SDL_SetRenderDrawColor(g.r, c_r, c_g, c_b, 0xFF);
   SDL_FRect body = {
     .x = boid->pos.x - 2,
     .y = boid->pos.y - 2,
@@ -152,9 +182,6 @@ static void RenderBoid(Boid *boid)
     .h = 4,
   };
   SDL_RenderFillRect(g.r, &body);
-
-  const Vec2 flag = boid->pos + (boid->vel * 4.0f);
-  SDL_RenderLine(g.r, boid->pos.x, boid->pos.y, flag.x, flag.y);
 }
 
 SDL_AppResult SDL_AppInit(void **, int, char **)
@@ -168,6 +195,7 @@ SDL_AppResult SDL_AppInit(void **, int, char **)
   if (!(g.r = SDL_CreateRenderer(g.wnd, 0))) {
     panic("Failed to create SDL renderer: %s", SDL_GetError());
   }
+  SDL_SetRenderDrawBlendMode(g.r, SDL_BLENDMODE_BLEND);
   g.boid_speed = 10.0f;
   g.boid_vision = 128.0f;
   g.boid_avoid = 20.0f;
@@ -200,7 +228,9 @@ SDL_AppResult SDL_AppIterate(void *)
 
   SDL_SetRenderDrawColor(g.r, 0xFF, 0xFF, 0x00, 0xFF);
   for (Boid *boid = g.boids; boid; boid = boid->next) {
-    SimulateBoid(boid, 1.0f / 60.0f);
+    if (!g.paused) {
+      SimulateBoid(boid, 1.0f / 60.0f);
+    }
     RenderBoid(boid);
   }
 
@@ -209,6 +239,7 @@ SDL_AppResult SDL_AppIterate(void *)
   SDL_RenderDebugText(g.r, 5.0f, 15.0f, "  M1       Spawn");
   SDL_RenderDebugText(g.r, 5.0f, 25.0f, "  Shift+M1 Spawn continuously");
   SDL_RenderDebugText(g.r, 5.0f, 35.0f, "  D        Clear");
+  SDL_RenderDebugText(g.r, 5.0f, 45.0f, "  Space    Pause");
 
   u32 boid_count = 0;
   for (Boid *boid = g.boids; boid; boid = boid->next) {
@@ -243,6 +274,9 @@ SDL_AppResult SDL_AppEvent(void *, SDL_Event *event)
           MemFree(boid);
         }
         g.boids = 0;
+      }
+      else if (event->key.key == SDLK_SPACE) {
+	g.paused = !g.paused;
       }
     } break;
     case SDL_EVENT_KEY_UP: {

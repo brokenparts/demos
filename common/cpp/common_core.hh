@@ -61,6 +61,8 @@ using usize = std::size_t;
 # define UNUSED(x) ((void)(x))
 #endif
 
+#define ARRLEN(a) (sizeof(a) / sizeof((a)[0]))
+
 template <typename T>
 static inline T Min(T v1, T v2)
 {
